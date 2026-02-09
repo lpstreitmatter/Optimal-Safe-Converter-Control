@@ -133,8 +133,8 @@ x = sp.Matrix([[i_i_d],[i_i_q],[i_g_d],[i_g_q],[v_c_d],[v_c_q],[phi_d],[phi_q],[
 x_dot = sp.Matrix([[state_dynamics[state]] for state in x]).subs(algebraic_expressions).subs(algebraic_expressions).subs(algebraic_expressions)
 
 ########################## SOLVE DYNAMICS ##########################
-def run_inner_loop(i_i_dq_val_0, i_i_dq_ref_val_new, e_dq_val, 
-                   r_i_val, r_g_val, l_i_val, l_g_val, c_val, 
+def run_inner_loop(i_i_dq_val_0, i_i_dq_ref_val_new, initial_state,
+                   e_dq_val, r_i_val, r_g_val, l_i_val, l_g_val, c_val, 
                    f_nom = 60, freq_cur=10000, freq_vol=2000, delta_t_outer_loop = 0.01):
     ''' 
     Function that takes current at time 0, desired new current setpoint (after gradient step), 
@@ -170,11 +170,15 @@ def run_inner_loop(i_i_dq_val_0, i_i_dq_ref_val_new, e_dq_val,
     # Convert v_i_dq_ref_val_new to v_c_dq_ref_val_new
     v_c_dq_ref_val_new = e_dq_val.T + Z_g.subs(lcl_subs) @ i_i_dq_ref_val_new
 
-    # Calculate full state x at initial condition
-    x0_guess = [*i_i_dq_val_0,*i_i_dq_val_0,*v_c_dq_ref_val_old,0,0,0,0]
     x_dot_num = x_dot.subs(sim_numeric_subs).evalf()
     f_t0 = x_dot_num.subs({v_c_d_ref:v_c_dq_ref_val_old[0], v_c_q_ref:v_c_dq_ref_val_old[1]}).evalf()
-    x0 = np.array(sp.nsolve(f_t0,x,x0_guess)).astype(np.float64).flatten()
+
+    # Calculate full state x at initial condition
+    if not initial_state.size:
+      x0_guess = [*i_i_dq_val_0,*i_i_dq_val_0,*v_c_dq_ref_val_old,0,0,0,0]
+      x0 = np.array(sp.nsolve(f_t0,x,x0_guess)).astype(np.float64).flatten()
+    else:
+      x0 = initial_state
 
     # Solve IVP
     f_inputs = [t,x,v_c_d_ref, v_c_q_ref]
@@ -188,8 +192,10 @@ def run_inner_loop(i_i_dq_val_0, i_i_dq_ref_val_new, e_dq_val,
 
     f_v_i_dq = sp.lambdify(x, V_i_dq.subs(algebraic_expressions).subs(sim_numeric_subs).subs({v_c_d_ref:v_c_dq_ref_val_new[0], v_c_q_ref:v_c_dq_ref_val_new[1]}))
     ts = sol.t
-    i_i_of_t = sol.y.T[:,0:2]
+    i_i_of_t = sol.y.T[:,0:2].T
     v_i_of_t = [f_v_i_dq(*x_) for x_ in sol.y.T]
-    v_i_of_t = np.hstack(v_i_of_t).T
+    v_i_of_t = np.hstack(v_i_of_t)
 
-    return (ts, i_i_of_t, v_i_of_t)
+    final_state = sol.y[:,-1]
+
+    return (ts, i_i_of_t, v_i_of_t, final_state)

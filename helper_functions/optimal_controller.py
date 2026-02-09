@@ -1,7 +1,6 @@
 import numpy as np
 import cvxpy as cp
-import inner_loop as il
-import plotting
+from . import inner_loop as il
 
 # Create the A matrix (used to relate Vdq and Idq)
 def make_A(R,L,omega):
@@ -16,18 +15,25 @@ J = np.array([[0,1],[-1,0]])
 
 ## Create M_P, M_Q, and M_V2 matrices for the SDP so that Tr(M_x W)=P,Q, or V2 ##
 # We are using RMS current and voltages so P=3*VI instead of 3/2, and same for Q. 
-def make_M_P(R,Vg):
+# When in per unit, just becomes P=VI
+def make_M_P(R,Vg,perunit=False):
     first_two_rows = np.hstack((3 * R * np.eye(2), 1.5 * Vg.reshape(2,1)))
     third_row = np.hstack((1.5 * Vg.reshape(1,2), np.array([[0]])))
+    if perunit:
+        return np.vstack((first_two_rows, third_row)) / 3
     return np.vstack((first_two_rows, third_row))  
 
-def make_M_Q(L,Vg,omega):
+def make_M_Q(L,Vg,omega,perunit=False):
+    # if in per unit, set L = x/omega_0 and omega=omega_0 
     JVg = J @ Vg
     first_two_rows = np.hstack((3 * omega * L * np.eye(2), 1.5 * JVg.reshape(2,1)))
     third_row = np.hstack((1.5 * JVg.reshape(1,2), np.array([[0]])))
+    if perunit:
+        return np.vstack((first_two_rows, third_row))/3
     return np.vstack((first_two_rows, third_row))  
 
 def make_M_V2(R,L,Vg,omega):
+    # if in per unit, set L = x/omega_0 and omega=omega_0
     Z = make_Z(R,L,omega)
     ZTVg = Z.T @ Vg
     first_two_rows = np.hstack( ( (R**2 + (omega*L)**2) * np.eye(2), ZTVg.reshape(2,1) ) )
@@ -105,18 +111,54 @@ def rank1_adjustment(W,M1,M2):
     x = d - mus[0] * c
     x2 = d - mus[1] * c
 
-    # Always the lowest magnitude current solution
+    # Always choose the lowest magnitude current solution
     if np.linalg.norm(x2) < np.linalg.norm(x):
         x = x2
     return x, np.outer(np.hstack((x,np.array([1]))),np.hstack((x,np.array([1]))))
 
+# Single Iteration of Control Algorithm
+def oc_single_iteration(setpoints, var_names, x0, R, L, Vg0,
+                        Imag_lim, omega,
+                        rho=0.01, alpha=0.00001,
+                        perunit=False):
+    # var_names is  a 2 element list which must have elements = "P", "Q" or r"$V^2$"
+    # if in per-unit, set L = x/omega_0 and omega=omega_0
+
+    # calculate matrices for SDP
+    M_dict = {"P":[make_M_P,[R,Vg0,perunit]], "Q":[make_M_Q,[L,Vg0,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg0,omega]]}
+    M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
+    M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
+
+    # calculate W0 from x0
+    outer_prod_vector = np.hstack((x0,np.array([1]))) 
+    W0 = np.outer(outer_prod_vector,outer_prod_vector)
+
+    # Initialize for time 0
+    var1_0 = np.trace(M1 @ W0)
+    var2_0 = np.trace(M2 @ W0)
+
+    # (Unconstrained) Gradient Descent Update
+    grad_f = (var1_0 - setpoints[0]) * M1
+    grad_f += (var2_0 - setpoints[1]) * M2
+    grad_f += rho * np.eye(3)
+    Wplus = W0 - alpha * grad_f
+
+    # Projected Gradient Descent Update (project gradient update back onto feasible set)
+    try:
+        Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
+    except:
+        # try another solver if it fails
+        Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+
+    # Rank 1 Adjustment
+    xplus, Wplus = rank1_adjustment(Wplus, M1, M2)
+    return xplus
 
 # Case 1: Setpoint change without any measurement noise
 def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
                         Imag_lim,omega,
                         rho=0.01,alpha=0.00001, dt=1e-3, 
-                        starttime=0.05, endtime=1,
-                        units=["W","VAr"],xlim=None,include_dq=False): 
+                        starttime=0.05, endtime=1): 
     # var_names is  a 2 element list which must have elements = "P", "Q" or r"$V^2$"
     ts = np.arange(0, endtime, dt)
 
@@ -124,7 +166,7 @@ def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
     M_dict = {"P":[make_M_P,[R,Vg]], "Q":[make_M_Q,[L,Vg,omega]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
     M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
     M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
-    A = make_A(R,L,omega=omega)
+    Zeq = make_Z(R, L, omega=omega)
 
     # calculate W0 from x0
     outer_prod_vector = np.hstack((x0,np.array([1]))) 
@@ -139,7 +181,7 @@ def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
 
     # Initialize for time 0
     Idq_of_t[:,0] = x0
-    Vdq_of_t[:,0] = Vg - L*A@x0
+    Vdq_of_t[:,0] = Vg + Zeq@x0
     var1_of_t[0] = np.trace(M1 @ W0)
     var2_of_t[0] = np.trace(M2 @ W0)
     
@@ -161,37 +203,62 @@ def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
         try:
             Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
         except:
+            # try another solver if it fails
             Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
 
         # Rank 1 Adjustment
         x, Wplus = rank1_adjustment(Wplus, M1, M2)
         
         Idq_of_t[:,i] = x
-        Vdq_of_t[:,i] = Vg - L*A@Idq_of_t[:,i]
+        Vdq_of_t[:,i] = Vg + Zeq@Idq_of_t[:,i]
         var1_of_t[i] = np.trace(M1 @ Wplus) 
         var2_of_t[i] = np.trace(M2 @ Wplus)
 
         Ws.append(Wplus)
         i += 1
-
-        # ADD PLOTTING
     
     return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
+
+# More inner loop helper functions
+
+def calculate_P(idq_of_t, vdq_of_t, perunit=False):
+    if perunit:
+        return np.sum(idq_of_t * vdq_of_t, axis=0)
+    return 3 * np.sum(idq_of_t * vdq_of_t, axis=0)
+
+def calculate_Q(idq_of_t, vdq_of_t, perunit=False):
+    if perunit:
+        return np.sum(idq_of_t * (J @ vdq_of_t), axis=0)
+    return 3 * np.sum(idq_of_t * (J @ vdq_of_t), axis=0)
+
+def calculate_V2(idq_of_t, vdq_of_t, perunit=False):
+    return np.sum(vdq_of_t*vdq_of_t, axis=0)
+
+var_map = {"P":calculate_P, "Q":calculate_Q, r"$V^2$":calculate_V2}
+    
+def calculate_var(idq_of_t, vdq_of_t, var_name, perunit=False):
+    func = var_map[var_name]
+    return func(idq_of_t, vdq_of_t, perunit=perunit)
 
 # Case 1 with Inner Loop Dynamics: Setpoint change without any measurement noise
-def oc_setpoint_change_with_il(new_setpoints, var_names, x0, R, L, Vg,
-                        Imag_lim,omega,
-                        rho=0.01,alpha=0.00001, dt=1e-2, 
-                        starttime=0.05, endtime=1,
-                        units=["W","VAr"],xlim=None,include_dq=False): 
+def oc_setpoint_change_with_il(new_setpoints, var_names, x0, 
+                               r_i_val, l_i_val, r_g_val, l_g_val, c_val, Vg,
+                               Imag_lim,omega,
+                               rho=0.01,alpha=0.00001, dt=1e-2, 
+                               starttime=0.05, endtime=1,
+                               freq_cur=10000, freq_vol=2000): 
     # var_names is  a 2 element list which must have elements = "P", "Q" or r"$V^2$"
-    ts = np.arange(0, endtime, dt)
+    R = r_i_val + r_g_val # for steady-state, outer loop calculations
+    L = l_i_val + l_g_val # for steady-state, outer loop calculations
+
+    outer_ts = np.arange(0, endtime, dt)
+    full_ts = np.zeros(1)
 
     # calculate matrices for SDP
     M_dict = {"P":[make_M_P,[R,Vg]], "Q":[make_M_Q,[L,Vg,omega]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
     M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
     M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
-    A = make_A(R,L,omega=omega)
+    A = make_A(R,L,omega)
 
     # calculate W0 from x0
     outer_prod_vector = np.hstack((x0,np.array([1]))) 
@@ -199,10 +266,10 @@ def oc_setpoint_change_with_il(new_setpoints, var_names, x0, R, L, Vg,
     Ws = [W0]
 
     # Create arrays to store Idq, Vdq, var1 and var2 over time
-    Idq_of_t = np.zeros((2,len(ts))) 
-    Vdq_of_t = np.zeros((2,len(ts))) 
-    var1_of_t = np.zeros(len(ts)) 
-    var2_of_t = np.zeros(len(ts))
+    Idq_of_t = np.zeros((2,1)) 
+    Vdq_of_t = np.zeros((2,1)) 
+    var1_of_t = np.zeros(1) 
+    var2_of_t = np.zeros(1)
 
     # Initialize for time 0
     Idq_of_t[:,0] = x0
@@ -210,40 +277,52 @@ def oc_setpoint_change_with_il(new_setpoints, var_names, x0, R, L, Vg,
     var1_of_t[0] = np.trace(M1 @ W0)
     var2_of_t[0] = np.trace(M2 @ W0)
     
-    i = 1
     setpoint1 = var1_of_t[0]
     setpoint2 = var2_of_t[0]
-    for t in ts[1:]:
+    final_state = np.array([])
+    for t in outer_ts[1:]:
+        t0 = t - dt
         if t > starttime:
             setpoint1 = new_setpoints[0]
             setpoint2 = new_setpoints[1]
 
         # (Unconstrained) Gradient Descent Update
-        grad_f = (var1_of_t[i-1] - setpoint1) * M1
-        grad_f += (var2_of_t[i-1] - setpoint2) * M2
+        grad_f = (var1_of_t[-1] - setpoint1) * M1
+        grad_f += (var2_of_t[-1] - setpoint2) * M2
         grad_f += rho * np.eye(3)
-        Wplus = Ws[i-1] - alpha * grad_f
+        Wplus = Ws[-1] - alpha * grad_f
 
         # Projected Gradient Descent Update (project gradient update back onto feasible set)
         try:
             Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
         except:
+            # try another solver if it fails
             Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
 
         # Rank 1 Adjustment
-        x, Wplus = rank1_adjustment(Wplus, M1, M2)
+        old_x = Idq_of_t[:,-1]
+        new_x, Wplus = rank1_adjustment(Wplus, M1, M2)
+
+        # Give new desired x to inner loop
+        inner_ts, i_i_of_t, v_i_of_t, final_state = il.run_inner_loop(old_x, new_x, final_state, 
+                                                                      Vg,r_i_val, r_g_val, l_i_val, l_g_val, c_val,
+                                                                      f_nom = omega/(2*np.pi), freq_cur=freq_cur, 
+                                                                      freq_vol=freq_vol, delta_t_outer_loop = dt)
         
-        Idq_of_t[:,i] = x
-        Vdq_of_t[:,i] = Vg - L*A@Idq_of_t[:,i]
-        var1_of_t[i] = np.trace(M1 @ Wplus) 
-        var2_of_t[i] = np.trace(M2 @ Wplus)
+        # Calculate var1 and var2
+        var1_inner = calculate_var(i_i_of_t, v_i_of_t, var_name=var_names[0])
+        var2_inner = calculate_var(i_i_of_t, v_i_of_t, var_name=var_names[1])
+
+        # Append to full_ts, Idq, Vdq, var1, and var2 vectors
+        full_ts = np.hstack([full_ts, t0+inner_ts])
+        Idq_of_t = np.hstack([Idq_of_t, i_i_of_t])
+        Vdq_of_t = np.hstack([Vdq_of_t, v_i_of_t])
+        var1_of_t = np.hstack([var1_of_t, var1_inner])
+        var2_of_t = np.hstack([var2_of_t, var2_inner])
 
         Ws.append(Wplus)
-        i += 1
-
-        # ADD PLOTTING
     
-    return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
+    return full_ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
 
-
+# Case 2: Grid voltage change with measurement noise
 
