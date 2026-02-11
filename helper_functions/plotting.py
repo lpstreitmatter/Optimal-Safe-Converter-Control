@@ -61,8 +61,10 @@ def set_S(var_names,Imag_lim,E,L,R,omega,pu=False):
 
 def plot_S(trajectory_data, ref_vals,var_names, 
            Imag_lim,E,L,R,omega, 
-           units = ["W","VAr"], ax = None, pu=False):
+           units = ["W","VAr"], ax = None, pu=False, second_trajectory=np.array([]), two_traj_labels=[]):
     # trajectory_data = [data_var1, data_var2]
+    # second_trajectory has same format, include if wanting to plot two trajectories side by side
+    # two_traj_labels has corresponding labels for the two trajectory datasets
     # ref_vals = [ref_val1, ref_val2]
     # data_labels = [label_var1, label_var2] where e.g. label_var1 = r"P"
     # units = [unit_var1, unit_var2]
@@ -71,14 +73,26 @@ def plot_S(trajectory_data, ref_vals,var_names,
 
     if ax == None:    
         fig,ax = plt.subplots()
-    ax.fill(region_data[:,0],region_data[:,1],c="gainsboro",label=r"Set $\mathcal{S}$")
-    ax.plot(ref_vals[0],ref_vals[1],"rx",label=fr"($\overline{{{var_names[0]}}},\overline{{{var_names[1].strip('$')}}}$)")
-    ax.plot(trajectory_data[0,0],trajectory_data[0,1],"k.",label=r"$t_0$")
-    ax.plot(trajectory_data[:,0], trajectory_data[:,1])
-    ax.plot(trajectory_data[-1,0],trajectory_data[-1,1],"r.",label=r"$t_f$")
-    ax.set_xlabel(f"{var_names[0]} ({units[0]})")
-    ax.set_ylabel(f"{var_names[1]} ({units[1]})")
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2)
+    ax.fill(region_data[:,0],region_data[:,1],c="gainsboro")
+    if len(trajectory_data):
+        ax.scatter(trajectory_data[0,0],trajectory_data[0,1],facecolors='none', edgecolors='k', marker='o',label=r"$t_0$")
+        ax.scatter(ref_vals[0],ref_vals[1],c="r", marker="x",s=50, linewidths=1, label=fr"($\overline{{{var_names[0]}}},\overline{{{var_names[1].strip('$')}}}$)")
+    
+    if len(second_trajectory):
+        ax.plot(trajectory_data[:,0], trajectory_data[:,1],c="C0",label=f"{two_traj_labels[0]}")
+        ax.scatter(trajectory_data[-1,0],trajectory_data[-1,1],marker="o", c="C0",label=rf"{two_traj_labels[0]} $t_f$")
+        ax.plot(second_trajectory[:,0], second_trajectory[:,1],c="C1",label=f"{two_traj_labels[1]}")
+        ax.scatter(second_trajectory[-1,0],second_trajectory[-1,1],marker="o", c="C1",label=rf"{two_traj_labels[1]} $t_f$")
+        ncol=3
+    elif len(trajectory_data):
+        ax.plot(trajectory_data[:,0], trajectory_data[:,1], c="C0")
+        ax.scatter(trajectory_data[-1,0],trajectory_data[-1,1],marker="o", c="C0",label=r"$t_f$")
+        ncol=2
+    else:
+        ncol=1
+    ax.set_xlabel(f"{var_names[0]} {units[0]}")
+    ax.set_ylabel(f"{var_names[1]} {units[1]}")
+    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=ncol)
     return
 
 def plot_magnitude_over_time(timestamps, data, current_lim = None, xlim = None, ax = None,include_dq=False,var_name="Current (A)"):
@@ -116,7 +130,7 @@ def plot_multi_inverters(timestamps, data, ylabel, inv_or_bus, xlim=None, inv_la
         ax.plot(timestamps, data[:,inv], label=f"{inv_or_bus} {inv_labels[inv]}", **kwargs)
     
     ax.set_ylabel(ylabel)
-    ax.set_xlabel("Time(s)")
+    ax.set_xlabel("Time (s)")
     if show_legend:
         ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=num_inv)
     if xlim:

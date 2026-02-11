@@ -79,6 +79,9 @@ def pq_droop_disturbance(new_setpoints, x0, R, L, Vg,
                 Vg = np.array(new_setpoints)
                 Vg_mag = np.linalg.norm(Vg)
                 v_nom = Vg_mag
+                
+                Vmag_plus = v_nom - m_q * (Qbar_of_t[i-1] - Q0)
+                omega_plus = omega_nom - m_p*(Pbar_of_t[i-1] - P0)
             
 
         # Update current according to new voltage and frequency setpoints
@@ -185,6 +188,9 @@ def pv2_droop_disturbance(new_setpoints, x0, R, L, Vg,
                 Vg = np.array(new_setpoints)
                 Vg_mag = np.linalg.norm(Vg)
                 v_nom = Vg_mag
+
+                Vmag_plus = np.sqrt(v_nom**2 - m_v2 * (V2bar_of_t[i-1] - V20))
+                omega_plus = omega_nom - m_p*(Pbar_of_t[i-1] - P0)
             
 
         # Update current according to new voltage and frequency setpoints
