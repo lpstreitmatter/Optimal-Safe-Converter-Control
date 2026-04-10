@@ -116,14 +116,14 @@ def plot_magnitude_over_time(timestamps, data, current_lim = None, xlim = None, 
         ax.set_xlim(xlim)
     return
 
-def plot_multi_inverters(timestamps, data, ylabel, inv_or_bus, xlim=None, inv_labels = None, ax=None, show_legend=True, **kwargs):
+def plot_multi_inverters(timestamps, data, ylabel, inv_or_bus, xlim=None, inv_labels = [], ax=None, show_legend=True, **kwargs):
     # timestamps = np array of timestamps
     # data = np array of shape num_timestamps x num_inv
     if ax == None:
         fig, ax = plt.subplots()
     
     num_inv = data.shape[1]
-    if inv_labels == None:
+    if len(inv_labels) == 0:
         inv_labels = np.arange(1, num_inv+1)
     
     for inv in range(num_inv):
