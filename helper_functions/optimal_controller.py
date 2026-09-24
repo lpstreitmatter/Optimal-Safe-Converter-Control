@@ -84,7 +84,9 @@ def pgd_update(Wk,Imag_lim,verbose=False,solver=cp.CLARABEL):
     converged = problem.status == cp.OPTIMAL
     if not converged:
         raise ValueError(f"Optimization problem did not converge! {problem.status}, {Wk}")
-    return Wplus.value
+    solve_time = problem.solver_stats.solve_time
+    num_iters = problem.solver_stats.num_iters
+    return Wplus.value, solve_time, num_iters
 
 # Rank 1 adjustment finds the vector x that produces the same var1 and var2 values as Wplus
 def rank1_adjustment(W,M1,M2):
@@ -145,22 +147,27 @@ def oc_single_iteration(setpoints, var_names, x0, R, L, Vg0,
 
     # Projected Gradient Descent Update (project gradient update back onto feasible set)
     try:
-        Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
+        Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
     except:
         # try another solver if it fails
-        Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+        Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim, solver=cp.SCS)
 
     # Rank 1 Adjustment
     xplus, Wplus = rank1_adjustment(Wplus, M1, M2)
-    return xplus
+    return xplus, solve_time, num_iters
 
 # Case 1: Setpoint change without any measurement noise
 def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
                         Imag_lim,omega,
                         rho=0.001,alpha=0.00001, dt=1e-3, 
                         starttime=0.05, endtime=1, perunit=False): 
+
     # var_names is  a 2 element list which must have elements = "P", "Q" or r"$V^2$"
     ts = np.arange(0, endtime, dt)
+
+    # for reporting
+    solve_time_stats = np.zeros(len(ts)-1)
+    num_iters_stats = np.zeros(len(ts)-1)
 
     # calculate matrices for SDP
     M_dict = {"P":[make_M_P,[R,Vg,perunit]], "Q":[make_M_Q,[L,Vg,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
@@ -201,10 +208,13 @@ def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
 
         # Projected Gradient Descent Update (project gradient update back onto feasible set)
         try:
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
         except:
             # try another solver if it fails
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+
+        solve_time_stats[i-1] = solve_time
+        num_iters_stats[i-1] = num_iters
 
         # Rank 1 Adjustment
         x, Wplus = rank1_adjustment(Wplus, M1, M2)
@@ -216,8 +226,95 @@ def oc_setpoint_change(new_setpoints, var_names, x0, R, L, Vg,
 
         Ws.append(Wplus)
         i += 1
-    
+    print(f"Average solve time: {np.mean(solve_time_stats)}, Longest solve time: {np.max(solve_time_stats)}")
+    print(f"Average num_iters: {np.mean(num_iters_stats)}, Largest num_iters: {np.max(num_iters_stats)}")
     return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
+
+# Case 1 with Vc instead of Edq
+def oc_setpoint_change_Vc(new_setpoints, var_names, x0, 
+                          R, L, Rf, Lf,
+                          Vg,Imag_lim,omega,
+                        rho=0.001,alpha=0.00001, dt=1e-3, 
+                        starttime=0.05, endtime=1, perunit=False): 
+
+    # var_names is  a 2 element list which must have elements = "P", "Q" or r"$V^2$"
+    ts = np.arange(0, endtime, dt)
+
+    # for reporting
+    solve_time_stats = np.zeros(len(ts)-1)
+    num_iters_stats = np.zeros(len(ts)-1)
+
+    # Initialize matrices for SDP
+    M_dict = {"P":[make_M_P,[R,Vg,perunit]], "Q":[make_M_Q,[L,Vg,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
+    M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
+    M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
+    Zeq = make_Z(R, L, omega=omega)
+    Zf = make_Z(Rf, Lf, omega=omega)
+
+    # calculate W0 from x0
+    outer_prod_vector = np.hstack((x0,np.array([1]))) 
+    W0 = np.outer(outer_prod_vector,outer_prod_vector)
+    Ws = [W0]
+
+    # Create arrays to store Idq, Vdq, var1 and var2 over time
+    Idq_of_t = np.zeros((2,len(ts))) 
+    Vdq_of_t = np.zeros((2,len(ts))) 
+    var1_of_t = np.zeros(len(ts)) 
+    var2_of_t = np.zeros(len(ts))
+    Vc_of_t = np.zeros((2,len(ts)))
+
+    # Initialize for time 0
+    Idq_of_t[:,0] = x0
+    Vdq_of_t[:,0] = Vg + Zeq@x0
+    var1_of_t[0] = np.trace(M1 @ W0)
+    var2_of_t[0] = np.trace(M2 @ W0)
+    Vc_of_t[:,0] = Vdq_of_t[:,0] - Zf@x0
+    
+    i = 1
+    setpoint1 = var1_of_t[0]
+    setpoint2 = var2_of_t[0]
+    for t in ts[1:]:
+        if t > starttime:
+            setpoint1 = new_setpoints[0]
+            setpoint2 = new_setpoints[1]
+
+        # Use capacitor voltage    
+        Vc = Vc_of_t[:,i-1]
+        M_dict = {"P":[make_M_P,[Rf,Vc,perunit]], "Q":[make_M_Q,[Lf,Vc,omega,perunit]], r"$V^2$":[make_M_V2,[Rf,Lf,Vc,omega]]}
+        M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
+        M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
+
+        # (Unconstrained) Gradient Descent Update
+        grad_f = (var1_of_t[i-1] - setpoint1) * M1
+        grad_f += (var2_of_t[i-1] - setpoint2) * M2
+        grad_f += rho * np.eye(3)
+        Wplus = Ws[i-1] - alpha * grad_f
+
+        # Projected Gradient Descent Update (project gradient update back onto feasible set)
+        try:
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
+        except:
+            # try another solver if it fails
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+
+        solve_time_stats[i-1] = solve_time
+        num_iters_stats[i-1] = num_iters
+
+        # Rank 1 Adjustment
+        x, Wplus = rank1_adjustment(Wplus, M1, M2)
+        
+        Idq_of_t[:,i] = x
+        Vdq_of_t[:,i] = Vg + Zeq@Idq_of_t[:,i]
+        var1_of_t[i] = np.trace(M1 @ Wplus) 
+        var2_of_t[i] = np.trace(M2 @ Wplus)
+        Vc_of_t[:,i] = Vdq_of_t[:,i] - Zf@Idq_of_t[:,i]
+
+        Ws.append(Wplus)
+        i += 1
+    print(f"Average solve time: {np.mean(solve_time_stats)}, Longest solve time: {np.max(solve_time_stats)}")
+    print(f"Average num_iters: {np.mean(num_iters_stats)}, Largest num_iters: {np.max(num_iters_stats)}")
+    return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
+
 
 # More inner loop helper functions
 
@@ -294,10 +391,10 @@ def oc_setpoint_change_with_il(new_setpoints, var_names, x0,
 
         # Projected Gradient Descent Update (project gradient update back onto feasible set)
         try:
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
         except:
             # try another solver if it fails
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
 
         # Rank 1 Adjustment
         old_x = Idq_of_t[:,-1]
@@ -325,16 +422,19 @@ def oc_setpoint_change_with_il(new_setpoints, var_names, x0,
     return full_ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
 
 
-# Case 2: Grid voltage change with measurement noise
-def oc_Edq_change(Vg_newmag, var_names, x0,R,L,Vg0_mag, 
+# Case 2a: Grid voltage change with measurement noise
+def oc_Edq_change(Vg_new, var_names, x0,R,L,Vg0, 
                   Imag_lim,omega,variance_size = 0.1,
                   rho=0.001,alpha=0.00001, dt=1e-3, 
                   starttime = 0.05, endtime=1, perunit=False): 
     
     ts = np.arange(0, endtime, dt)
 
+    # for reporting
+    solve_time_stats = np.zeros(len(ts)-1)
+    num_iters_stats = np.zeros(len(ts)-1)
+
     # calculate matrices for SDP
-    Vg0 = np.array([Vg0_mag,0])
     M_dict = {"P":[make_M_P,[R,Vg0,perunit]], "Q":[make_M_Q,[L,Vg0,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg0,omega]]}
     M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
     M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
@@ -361,6 +461,8 @@ def oc_Edq_change(Vg_newmag, var_names, x0,R,L,Vg0_mag,
     var2_of_t[0] = setpoint2
     Vg_of_t[:,0] = Vg0
 
+    Vg_newmag = np.linalg.norm(Vg_new)
+
     i = 1
     # Define extra index to help in determining the amount of noise in Vg measurement at any given time
     s = 1.0
@@ -374,9 +476,9 @@ def oc_Edq_change(Vg_newmag, var_names, x0,R,L,Vg0_mag,
         else:
             # measurement noise begins as Vg changes
             variance = variance_size * Vg_newmag / s # noise has decaying variance over time
-            Vg = np.array([Vg_newmag,0]) + np.random.normal(0,np.sqrt(variance),2)
+            Vg = Vg_new + np.random.normal(0,np.sqrt(variance),2)
             s += 1.0
-            Vg_actual = np.array([Vg_newmag,0])
+            Vg_actual = Vg_new
 
         Vg_of_t[:,i] = Vg
         M_dict = {"P":[make_M_P,[R,Vg,perunit]], "Q":[make_M_Q,[L,Vg,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
@@ -396,20 +498,99 @@ def oc_Edq_change(Vg_newmag, var_names, x0,R,L,Vg0_mag,
 
         # Projected Gradient Descent Update (project gradient update back onto feasible set)
         try:
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
         except:
-            Wplus = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
 
+        solve_time_stats[i-1] = solve_time
+        num_iters_stats[i-1] = num_iters
         # Rank 1 Adjustment
         x, Wplus = rank1_adjustment(Wplus, M1, M2)
         
         Idq_of_t[:,i] = x
-        Vdq_of_t[:,i] = Vg + Zeq@Idq_of_t[:,i]
+        Vdq_of_t[:,i] = Vg_actual + Zeq@Idq_of_t[:,i]
         var1_of_t[i] = np.trace(M1_actual @ Wplus) # P and Q are measured without noise so use M1 actual and M2 actual
         var2_of_t[i] = np.trace(M2_actual @ Wplus)
 
         Ws.append(Wplus)
         i += 1
-
+    print(f"Average solve time: {np.mean(solve_time_stats)}, Longest solve time: {np.max(solve_time_stats)}")
+    print(f"Average num_iters: {np.mean(num_iters_stats)}, Largest num_iters: {np.max(num_iters_stats)}")   
     return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t, Vg_of_t
+
+# Case 2b: Custom grid voltage timeseries, no noise
+def oc_Edq_change_customVg(Vg_of_t, var_names, x0,R,L,
+                  Imag_lim,omega, rho=0.001,alpha=0.00001, 
+                  dt=1e-3,perunit=False): 
+    
+    # Vg_of_t must be shape 2 by t
+    
+    ts = np.arange(0, Vg_of_t.shape[1] * dt, dt)
+
+    # for reporting
+    solve_time_stats = np.zeros(len(ts)-1)
+    num_iters_stats = np.zeros(len(ts)-1)
+    Vg0 = Vg_of_t[:,0]
+
+    # calculate matrices for SDP
+    M_dict = {"P":[make_M_P,[R,Vg0,perunit]], "Q":[make_M_Q,[L,Vg0,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg0,omega]]}
+    M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
+    M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
+    Zeq = make_Z(R,L,omega=omega)
+
+    # calculate W0
+    outer_prod_vector = np.hstack((x0,np.array([1]))) 
+    W0 = np.outer(outer_prod_vector,outer_prod_vector)
+    Ws = [W0]
+
+    # Create arrays to store Idq, Vdq, var1, var2, and Vg over time
+    Idq_of_t = np.zeros((2,len(ts)))
+    Vdq_of_t = np.zeros((2,len(ts)))
+    var1_of_t = np.zeros(len(ts))
+    var2_of_t = np.zeros(len(ts))
+
+    # Initialize for time 0
+    Idq_of_t[:,0] = x0
+    Vdq_of_t[:,0] = Vg0 + Zeq@x0
+    setpoint1 = np.trace(M1 @ W0)
+    setpoint2 = np.trace(M2 @ W0) 
+    var1_of_t[0] = setpoint1
+    var2_of_t[0] = setpoint2
+
+    i = 1
+
+    for t in ts[1:]:
+        Vg = Vg_of_t[:,i]
+        M_dict = {"P":[make_M_P,[R,Vg,perunit]], "Q":[make_M_Q,[L,Vg,omega,perunit]], r"$V^2$":[make_M_V2,[R,L,Vg,omega]]}
+
+        M1 = M_dict[var_names[0]][0](*M_dict[var_names[0]][1])
+        M2 = M_dict[var_names[1]][0](*M_dict[var_names[1]][1])
+
+        # Gradient Descent Update
+        grad_f = (var1_of_t[i-1] - setpoint1) * M1 # Here P and Q are measured without voltage noise but the gradient M1/M2 is noisy
+        grad_f += (var2_of_t[i-1] - setpoint2) * M2
+        grad_f += rho * np.eye(3)
+        Wplus = Ws[i-1] - alpha * grad_f
+
+        # Projected Gradient Descent Update (project gradient update back onto feasible set)
+        try:
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim)
+        except:
+            Wplus, solve_time, num_iters = pgd_update(Wplus,Imag_lim=Imag_lim,solver=cp.SCS)
+
+        solve_time_stats[i-1] = solve_time
+        num_iters_stats[i-1] = num_iters
+        # Rank 1 Adjustment
+        x, Wplus = rank1_adjustment(Wplus, M1, M2)
+        
+        Idq_of_t[:,i] = x
+        Vdq_of_t[:,i] = Vg + Zeq@Idq_of_t[:,i]
+        var1_of_t[i] = np.trace(M1 @ Wplus)
+        var2_of_t[i] = np.trace(M2 @ Wplus)
+
+        Ws.append(Wplus)
+        i += 1
+    print(f"Average solve time: {np.mean(solve_time_stats)}, Longest solve time: {np.max(solve_time_stats)}")
+    print(f"Average num_iters: {np.mean(num_iters_stats)}, Largest num_iters: {np.max(num_iters_stats)}")
+    return ts, Idq_of_t,Vdq_of_t,var1_of_t,var2_of_t
 

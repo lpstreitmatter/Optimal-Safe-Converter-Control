@@ -175,12 +175,12 @@ def multi_inv_simulation(slack_id, inverter_bus_ids, inverter_setpoints, inverte
         xpluses = np.zeros(n_keep*2)
         for inv in range(n_keep):
             if starttime < t < returntime:
-                xplus = oc.oc_single_iteration(inverter_setpoints[inv,:], inverter_varnames[inv,:], Iinvs[k,2*inv:2*inv+2], 
+                xplus, solve_time, num_iters = oc.oc_single_iteration(inverter_setpoints[inv,:], inverter_varnames[inv,:], Iinvs[k,2*inv:2*inv+2], 
                                             filter_rs[inv], filter_xs[inv]/omega, Vgs[k,2*inv:2*inv+2], inverter_mag_limits[inv], omega,
                                                 rho=rho, alpha=alpha,
                                                 perunit=perunit)
             else:
-                xplus = oc.oc_single_iteration(original_inv_setpoints[inv,:], inverter_varnames[inv,:], Iinvs[k,2*inv:2*inv+2], 
+                xplus, solve_time, num_iters = oc.oc_single_iteration(original_inv_setpoints[inv,:], inverter_varnames[inv,:], Iinvs[k,2*inv:2*inv+2], 
                                             filter_rs[inv], filter_xs[inv]/omega, Vgs[k,2*inv:2*inv+2], inverter_mag_limits[inv], omega,
                                                 rho=rho, alpha=alpha,
                                                 perunit=perunit)                
